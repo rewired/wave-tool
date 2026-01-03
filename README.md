@@ -7,7 +7,8 @@ single-cycle frames concatenated into a mono WAV written to `/out`.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate # Linux/MacOS
+.venv\Scripts\Activate.ps1 # Windows
 pip install -r requirements.txt
 ```
 
