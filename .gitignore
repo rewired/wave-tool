@@ -13,5 +13,3 @@ __pycache__/
 Thumbs.db
 .vscode/*.log
 .vscode/.ropeproject
-
-/out/*.wav
