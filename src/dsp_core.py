@@ -1,4 +1,3 @@
-# src/dsp_core.py
 from __future__ import annotations
 
 import numpy as np
@@ -9,6 +8,7 @@ EPS = 1e-12
 # -----------------------------
 # Basic signal hygiene
 # -----------------------------
+
 def remove_dc(x: np.ndarray) -> np.ndarray:
     """Remove DC offset."""
     x = np.asarray(x, dtype=np.float64)
@@ -24,140 +24,88 @@ def normalize_peak(x: np.ndarray, peak: float = 0.99) -> np.ndarray:
     return x * (peak / m)
 
 
-def sanitize_cycle(x: np.ndarray, peak: float = 0.99) -> np.ndarray:
+def align_max_negative_jump(x: np.ndarray) -> np.ndarray:
+    """Rotate so the largest negative jump occurs at index 0."""
+    x = np.asarray(x, dtype=np.float64)
+    diffs = np.diff(x, append=x[0])
+    idx = int(np.argmin(diffs))
+    return np.roll(x, -(idx + 1))
+
+
+def sanitize_cycle(
+    x: np.ndarray,
+    *,
+    peak: float = 0.99,
+    align_discontinuity: bool = False,
+) -> np.ndarray:
     """Standard cleanup for a single-cycle frame."""
     x = remove_dc(x)
+    if align_discontinuity:
+        x = align_max_negative_jump(x)
     x = normalize_peak(x, peak=peak)
     return x
 
 
 # -----------------------------
-# FFT helpers
+# Spectrum helpers
 # -----------------------------
-def rfft(x: np.ndarray) -> np.ndarray:
-    """Real FFT."""
-    x = np.asarray(x, dtype=np.float64)
-    return np.fft.rfft(x)
 
-
-def irfft(X: np.ndarray, n: int) -> np.ndarray:
-    """Inverse real FFT to time domain of length n."""
-    return np.fft.irfft(X, n=n)
-
-
-def mag_phase(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return magnitude and phase (angle)."""
-    return np.abs(X), np.angle(X)
-
-
-def polar(mag: np.ndarray, phase: np.ndarray) -> np.ndarray:
-    """Construct complex spectrum from magnitude and phase."""
-    return mag * np.exp(1j * phase)
-
-
-# -----------------------------
-# Spectral shaping
-# -----------------------------
-def harmonic_mask(n_bins: int, max_harm: int) -> np.ndarray:
-    """
-    Mask that keeps bins 0..max_harm (including DC) and zeros the rest.
-    n_bins is len(rfft(frame)) i.e. N/2+1.
-    """
+def clamp_max_harm(max_harm: int, frame_len: int) -> int:
+    """Clamp max harmonic to a valid range for the frame length."""
     max_harm = int(max_harm)
-    m = np.zeros(n_bins, dtype=np.float64)
-    hi = min(max_harm, n_bins - 1)
-    m[: hi + 1] = 1.0
-    return m
+    nyq = frame_len // 2 - 1
+    return max(1, min(max_harm, nyq))
 
 
-def apply_harmonic_limit(frame: np.ndarray, max_harm: int) -> np.ndarray:
-    """
-    Hard harmonic culling in the spectral domain.
-    max_harm counts FFT bins (harmonic numbers for a single-cycle).
-    """
-    x = np.asarray(frame, dtype=np.float64)
-    N = x.shape[0]
-    X = rfft(x)
-    m = harmonic_mask(len(X), max_harm=max_harm)
-    X2 = X * m
-    y = irfft(X2, n=N)
-    return y
+def lanczos_taper(max_harm: int) -> np.ndarray:
+    """Lanczos (sinc) taper for harmonics 0..max_harm."""
+    if max_harm < 1:
+        return np.ones(1, dtype=np.float64)
+    k = np.arange(0, max_harm + 1, dtype=np.float64)
+    x = k / (max_harm + 1)
+    return np.sinc(x)
 
 
-# -----------------------------
-# Morphing (the critical part)
-# -----------------------------
-def spectral_morph(
-    a: np.ndarray,
-    b: np.ndarray,
-    m: float,
+def harmonic_spectrum(
+    amps: np.ndarray,
+    frame_len: int,
     *,
-    phase_source: str = "a",
-    mag_curve: str = "linear",
+    phase: float = -np.pi / 2,
 ) -> np.ndarray:
-    """
-    Spectral morph between two single-cycle frames.
-    - Interpolates magnitudes (not time-domain samples).
-    - Uses a stable phase reference to keep the cycle coherent.
+    """Build a complex rFFT spectrum from harmonic amplitudes."""
+    amps = np.asarray(amps, dtype=np.float64)
+    n_bins = frame_len // 2 + 1
+    spec = np.zeros(n_bins, dtype=np.complex128)
+    max_harm = min(len(amps) - 1, n_bins - 1)
+    if max_harm <= 0:
+        return spec
+    phasor = np.exp(1j * phase)
+    spec[1 : max_harm + 1] = amps[1 : max_harm + 1] * phasor
+    return spec
 
-    phase_source:
-      "a"   -> keep phase of a across morph (stable for families)
-      "b"   -> keep phase of b
-      "mix" -> interpolate phase (can cause phase wandering; use intentionally)
 
-    mag_curve:
-      "linear" -> straight interpolation
-      "sqrt"   -> slightly more perceptually even (optional)
-    """
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    if a.shape != b.shape:
-        raise ValueError(f"Frame size mismatch: {a.shape} vs {b.shape}")
-
-    N = a.shape[0]
-    m = float(np.clip(m, 0.0, 1.0))
-
-    A = rfft(a)
-    B = rfft(b)
-
-    magA, phA = mag_phase(A)
-    magB, phB = mag_phase(B)
-
-    if mag_curve == "linear":
-        mag = (1.0 - m) * magA + m * magB
-    elif mag_curve == "sqrt":
-        # reduces perceived "jump" in some cases
-        mag = np.sqrt((1.0 - m) * (magA**2) + m * (magB**2))
-    else:
-        raise ValueError(f"Unknown mag_curve: {mag_curve}")
-
-    if phase_source == "a":
-        phase = phA
-    elif phase_source == "b":
-        phase = phB
-    elif phase_source == "mix":
-        # NOTE: Phase interpolation can wrap; unwrap to reduce discontinuities
-        phA_u = np.unwrap(phA)
-        phB_u = np.unwrap(phB)
-        phase = (1.0 - m) * phA_u + m * phB_u
-    else:
-        raise ValueError(f"Unknown phase_source: {phase_source}")
-
-    C = polar(mag, phase)
-    y = irfft(C, n=N)
-    return y
+def harmonics_to_frame(
+    amps: np.ndarray,
+    frame_len: int,
+    *,
+    phase: float = -np.pi / 2,
+) -> np.ndarray:
+    """Synthesize a single-cycle frame from harmonic amplitudes."""
+    spec = harmonic_spectrum(amps, frame_len, phase=phase)
+    return np.fft.irfft(spec, n=frame_len)
 
 
 # -----------------------------
-# Diagnostics (optional but useful)
+# Diagnostics (optional)
 # -----------------------------
+
 def spectrum_db(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Return (bin_index, magnitude_db) for a single-cycle frame.
     Useful for plotting/debugging.
     """
     x = np.asarray(frame, dtype=np.float64)
-    X = rfft(x)
+    X = np.fft.rfft(x)
     mag = np.abs(X)
     mag_db = 20.0 * np.log10(np.maximum(mag, EPS))
     bins = np.arange(len(mag_db))
