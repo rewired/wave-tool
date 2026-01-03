@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Generated wavetable exports
+/out/*.wav
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/*.log
+.vscode/.ropeproject
+
+/out/*.wav
